@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<head>
+<meta charset="ascii">
+<title>Muffin</title>
+<style>
+body {
+    background-color: black;
+    margin: 0;
+    overflow: hidden;
+}
+body.center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+
+@media (max-resolution: 1x) {
+    input[type="button"] {
+        font-size: 1.25em;
+        padding: 0.5em;
+    }
+}
+@media (min-resolution: 2x) {
+    input[type="button"] {
+        font-size: 2em;
+        padding: 1em;
+    }
+}
+@media (-webkit-min-device-pixel-ratio: 2) {
+    input[type="button"] {
+        font-size: 2em;
+        padding: 1em;
+    }
+}
+
+#error-msg {
+    color: white;
+    display: none;
+    font-family: monospace;
+    font-size: 1.2em;
+    height: 100%;
+    left: 0;
+    padding-top: 20%;
+    position: fixed;
+    text-align: center;
+    top: 0;
+    width: 100%;
+}
+</style>
+</head>
+
+<body class="center">
+<input type="button" id="start-button" value="Start Game"
+    style="display: none;">
+<canvas id="canvas" class="emscripten"></canvas>
+<div id="error-msg"></div>
+
+<script src="muffin.js"></script>
+<script src="script.min.js"></script>
+</body>
