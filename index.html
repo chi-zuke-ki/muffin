@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<head>
+<meta charset="ascii">
+<meta name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1"/>
+<title>Muffin</title>
+<style>
+body {
+    background-color: black;
+    margin: 0;
+    overflow: hidden;
+}
+body.center {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+#error-msg {
+    color: white;
+    display: none;
+    font-family: monospace;
+    font-size: 1.2em;
+    height: 100%;
+    left: 0;
+    padding-top: 20%;
+    position: fixed;
+    text-align: center;
+    top: 0;
+    width: 100%;
+}
+</style>
+</head>
+
+<body class="center">
+<input type="button" id="start-button" value="Start Game"
+    style="display: none;">
+<canvas id="canvas" class="emscripten"></canvas>
+<div id="error-msg"></div>
+<script src="script.js"></script>
+<script>
+'use strict';
+
+const canvas = document.getElementById('canvas');
+GLctx = canvas.getContext('webgl', {alpha: false});
+
+const start_button = document.getElementById('start-button');
+const error_msg_div = document.getElementById('error-msg');
+const Init = Module.cwrap(
+    'Init', null, ['number', 'number', 'number', 'number']);
+const Step = Module.cwrap('Step', 'number', ['number', 'number', 'number']);
+const LoadState = Module.cwrap('LoadState');
+const SetViewport = Module.cwrap(
+    'SetViewport', null, ['number', 'number', 'number']);
+const TouchDown = Module.cwrap(
+    'TouchDown', null, ['number', 'number', 'number']);
+const TouchUp = Module.cwrap(
+    'TouchUp', null, ['number', 'number', 'number']);
+const TouchMove = Module.cwrap(
+    'TouchMove', null, ['number', 'number', 'number']);
+
+const OrientationNone = 0;
+const Orientation0 = 1;
+const Orientation90 = 2;
+const Orientation180 = 3;
+const Orientation270 = 4;
+
+let onSafari = false;
+let emulated_orientation = OrientationNone;
+let width = window.innerWidth;
+let height = window.innerHeight;
+let started = false;
+const touch_ids = [null, null];
+const mouse_down = [];
+const accelerometer = [ 0.0, 1.0, 0.0 ];
+
+function SyncFs() {
+    FS.syncfs(err => {
+        if (err) {
+            console.error(err);
+            return;
+        }
+
+        SetStateClean();
+        window.requestAnimationFrame(Animate);
+    });
+}
+
+function SetStateDirty() {
+    window.addEventListener('beforeunload', UnloadListener);
+}
+
+function SetStateClean() {
+    window.removeEventListener('beforeunload', UnloadListener);
+}
+
+function LogError(msg) {
+    console.error(msg);
+    error_msg_div.textContent = msg;
+    canvas.style.setProperty('display', 'none');
+    error_msg_div.style.setProperty('display', 'block');
+}
+
+function ProcessTouches(evt, on_match, on_null) {
+    evt.preventDefault();
+    for (const touch of evt.changedTouches) {
+        const id = touch.identifier;
+        for (let pointer_id = 0; pointer_id < touch_ids.length; pointer_id++) {
+            if (on_null && touch_ids[pointer_id] === null) {
+                touch_ids[pointer_id] = id;
+            }
+            if (touch_ids[pointer_id] === id) {
+                const canvas_pos = canvas.getBoundingClientRect();
+                on_match(
+                    pointer_id,
+                    (touch.clientX - canvas_pos.x) / width,
+                    1 - (touch.clientY - canvas_pos.y) / height);
+                if (on_null) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+function UnloadListener(e) {
+    e.preventDefault();
+}
+
+function TouchStartListener(evt) {
+    ProcessTouches(evt, TouchDown, true);
+}
+
+function TouchEndListener(evt) {
+    ProcessTouches(evt, (pointer_id, x, y) => {
+        TouchUp(pointer_id, x, y);
+        touch_ids[pointer_id] = null;
+    });
+}
+
+function TouchMoveListener(evt) {
+    ProcessTouches(evt, TouchMove);
+}
+
+function ProcessMouse(touch_event, pointer_id, evt) {
+    const canvas_pos = canvas.getBoundingClientRect();
+    touch_event(
+        pointer_id,
+        (evt.clientX - canvas_pos.x) / width,
+        1 - (evt.clientY - canvas_pos.y) / height);
+}
+
+function MouseDownListener(evt) {
+    const pointer_id = evt.button === 0 ? 0 : 1;
+    mouse_down.push(pointer_id);
+    ProcessMouse(TouchDown, pointer_id, evt);
+}
+
+function MouseUpListener(evt) {
+    const pointer_id = evt.button === 0 ? 0 : 1;
+    mouse_down.splice(mouse_down.indexOf(pointer_id), 1);
+    ProcessMouse(TouchUp, pointer_id, evt);
+}
+
+function MouseMoveListener(evt) {
+    if (mouse_down.length === 0) {
+        return;
+    }
+    const pointer_id = mouse_down[0];
+    ProcessMouse(TouchMove, pointer_id, evt);
+}
+
+function ContextMenuListener(evt) {
+    evt.preventDefault();
+}
+
+function StartFromWasm() {
+    FS.mkdir('/data');
+    FS.mount(IDBFS, {}, '/data');
+    FS.syncfs(true, err => {
+        if (err) {
+            console.error(err);
+            return;
+        }
+        LoadState();
+    });
+}
+
+function Animate() {
+    if (!Step(accelerometer[0], accelerometer[1], accelerometer[2])) {
+        window.requestAnimationFrame(Animate);
+    }
+}
+
+function MobileResume() {
+    canvas.style.setProperty('display', 'none');
+    document.body.classList.add('center');
+    start_button.value = started ? "Resume Game" : "Start Game";
+    start_button.style.setProperty('display', 'block');
+}
+
+function AccessAccelerometer() {
+    start_button.style.setProperty('display', 'none');
+    document.body.classList.remove('center');
+    canvas.style.setProperty('display', 'block');
+
+    if (!window.DeviceMotionEvent) {
+        LogError("Can't access accelerometer.");
+        return;
+    }
+    if (!DeviceMotionEvent.requestPermission) {
+        GoFullscreen();
+    }
+
+    const promise = DeviceMotionEvent.requestPermission();
+    if (!promise) {
+        LogError(
+            "Can't request access to accelerometer: " +
+            "DeviceMotionEvent.requestPermission returned " + promise);
+        return;
+    }
+
+    promise.then(GoFullscreen);
+    promise.catch(err => {
+        LogError(
+            "Can't access accelerometer: exception caught by " +
+            "DeviceMotionEvent.requestPermission: " + err);
+    });
+}
+
+function GoFullscreen() {
+    if (!document.documentElement.requestFullscreen) {
+        LockOrientationError("Can't go fullscreen: not supported by browser.");
+        return;
+    }
+    const promise = document.documentElement.requestFullscreen();
+    if (!promise) {
+        LockOrientationError(
+            "Can't go fullscreen: document.documentElement.requestFullscreen " +
+            "returned " + promise);
+        return;
+    }
+    promise.then(FullscreenSuccess);
+}
+
+function FullscreenSuccess() {
+    if (!(window.screen && screen.orientation)) {
+        LockOrientationError(
+            "Can't lock screen orientation: not supported by browser.");
+        return;
+    }
+    const promise = screen.orientation.lock('landscape-primary');
+    if (!promise) {
+        LockOrientationError(
+            "Can't lock screen orientation: " +
+            "screen.orientation.lock returned " + promise);
+        return;
+    }
+    promise.then(LockOrientationSuccess);
+    promise.catch(err => {
+        LockOrientationError(
+            "Can't lock screen orientation: exception caught by " +
+            "screen.orientation.lock: " + err);
+    });
+}
+
+function LockOrientationError(errMsg) {
+    console.error(errMsg);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    if (!started) {
+        MobileStartFromJs();
+    }
+}
+
+function LockOrientationSuccess() {
+    width = screen.width;
+    height = screen.height;
+    canvas.width = width;
+    canvas.height = height;
+    if (!started) {
+        MobileStartFromJs();
+    }
+}
+
+function MobileStartFromJs() {
+    window.addEventListener('devicemotion', evt => {
+        const acc = evt.accelerationIncludingGravity;
+        accelerometer[0] = acc.x;
+        accelerometer[1] = acc.y;
+        accelerometer[2] = acc.z;
+        if (onSafari) {
+            accelerometer[0] = -accelerometer[0];
+            accelerometer[1] = -accelerometer[1];
+            accelerometer[2] = -accelerometer[2];
+        }
+    });
+    canvas.addEventListener(
+        'touchstart', TouchStartListener, { passive: false });
+    canvas.addEventListener(
+        'touchend', TouchEndListener, { passive: false });
+    canvas.addEventListener(
+        'touchmove', TouchMoveListener, { passive: false });
+    StartFromJs();
+}
+
+function StartFromJs() {
+    started = true;
+    canvas.width = width;
+    canvas.height = height;
+    Init(/*do_upscale_blending=*/false, GetOrientation(), width, height);
+}
+
+function GetOrientation() {
+    if (emulated_orientation != OrientationNone) {
+        return emulated_orientation;
+
+    } else if (window.screen && screen.orientation) {
+        switch (screen.orientation.angle) {
+            case 0:
+                return Orientation0;
+            case 90:
+                return Orientation90;
+            case 180:
+                return Orientation180;
+            case 270:
+                return Orientation270;
+            default:
+                console.error(
+                    'Invalid orientation angle:', screen.orientation.angle);
+                return OrientationNone;
+        }
+
+    } else {
+        switch (window.orientation) {
+            case 0:
+                return Orientation0;
+            case 90:
+                return Orientation90;
+            case 180:
+                return Orientation180;
+            case -90:
+                return Orientation270;
+            default:
+                console.error('Invalid orientation angle:', window.orientation);
+                return OrientationNone;
+        }
+    }
+}
+
+function RuntimeInitializedListener() {
+    window.addEventListener('resize', WindowResizeListener);
+    if (window.screen && screen.orientation) {
+        screen.orientation.addEventListener('change', WindowResizeListener);
+    } else {
+        window.addEventListener('orientationchange', WindowResizeListener);
+    }
+    let isMobile = true;
+    try {
+        document.createEvent('TouchEvent');
+    } catch (err) {
+        isMobile = false;
+    }
+
+    const userAgent = navigator.userAgent;
+    onSafari = userAgent.includes('Safari') && !userAgent.includes('Chrome');
+
+    if (isMobile) {
+        start_button.addEventListener('click', AccessAccelerometer);
+        document.addEventListener(
+            'visibilitychange', DocumentVisibilityChangeListener);
+        MobileResume();
+
+    } else {
+        LogError("Touch events not supported on device.");
+        // canvas.addEventListener('mousedown', MouseDownListener);
+        // canvas.addEventListener('mouseup', MouseUpListener);
+        // canvas.addEventListener('mousemove', MouseMoveListener);
+        // canvas.addEventListener('contextmenu', ContextMenuListener);
+        // document.addEventListener('keydown', DocumentKeydownListener);
+        // document.addEventListener('keyup', DocumentKeyupListener);
+        // emulated_orientation = Orientation0;
+        // SetEmulatedCanvasSize();
+        // StartFromJs();
+    }
+}
+
+function SetEmulatedCanvasSize() {
+    const max_dim = Math.min(window.innerWidth, window.innerHeight);
+    const min_dim = max_dim / 1.5;
+    if (emulated_orientation & 1) {
+        width = max_dim;
+        height = min_dim;
+    } else {
+        width = min_dim;
+        height = max_dim;
+    }
+    canvas.width = width;
+    canvas.height = height;
+}
+
+function SetEmulatedAccelerometer() {
+    accelerometer[2] = 0;
+    switch (emulated_orientation) {
+        case Orientation90:
+            accelerometer[0] = 1;
+            accelerometer[1] = 0;
+            break;
+        case Orientation180:
+            accelerometer[0] = 0;
+            accelerometer[1] = -1;
+            break;
+        case Orientation270:
+            accelerometer[0] = -1;
+            accelerometer[1] = 0;
+            break;
+        default:
+            accelerometer[0] = 0;
+            accelerometer[1] = 1;
+            break;
+    }
+}
+
+function WindowResizeListener() {
+    if (emulated_orientation != OrientationNone) {
+        SetEmulatedCanvasSize();
+    } else {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+    }
+    SetViewport(GetOrientation(), width, height);
+}
+
+function DocumentKeydownListener(evt) {
+    switch (evt.keyCode) {
+        case 17:  // Ctrl
+            ProcessMouse(TouchDown, 1, evt);
+            return;
+        case 37:  // Left
+            emulated_orientation = emulated_orientation % 4 + 1;
+            break;
+        case 39:  // Right
+            emulated_orientation -= 1;
+            if (emulated_orientation < 1) {
+                emulated_orientation = 4;
+            }
+            break;
+        default:
+            return;
+    }
+    SetEmulatedCanvasSize();
+    SetEmulatedAccelerometer();
+    SetViewport(GetOrientation(), width, height);
+}
+
+function DocumentKeyupListener(evt) {
+    if (evt.keyCode == 17) {
+        ProcessMouse(TouchUp, 1, evt);
+    }
+}
+
+function DocumentVisibilityChangeListener() {
+    MobileResume();
+}
+
+Module['onRuntimeInitialized'] = RuntimeInitializedListener;
+</script>
+</body>
